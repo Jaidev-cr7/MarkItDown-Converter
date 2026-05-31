@@ -477,7 +477,7 @@ with st.sidebar:
     embedded_ocr_mode = st.selectbox(
         "Embedded Image OCR",
         options=["Disabled", "Smart (Recommended)", "Aggressive"],
-        index=1,
+        index=0,
         help=(
             "Disabled: Skip OCR on all embedded images — fastest.\n"
             "Smart(Recommended): Only OCR images likely to contain useful text. Filters logos, maps, icons automatically.\n"
