@@ -8,9 +8,9 @@ A clean, responsive Streamlit application that converts any document to clean, L
 - **Wide Format Support:** Converts PDF, DOCX, PPTX, XLSX, HTML, TXT, CSV, JSON, XML, Images, Audio, and EPUB.
 - **OCR Fallback:** Automatically extracts text from scanned PDFs and images using [EasyOCR](https://github.com/JaidedAI/EasyOCR) — no system binary required, works on Streamlit Community Cloud.
 - **Markdown Optimization:** Strips OCR artifacts, page numbers, duplicate headings, and excess whitespace to reduce token usage. Shows before/after token savings.
-- **Smart Chunking:** Split large documents into LLM-friendly chunks (4K / 8K / 16K / Custom tokens) and download all chunks as a ZIP.
+- **Smart Chunking:** Split large documents into LLM-friendly chunks (4K / 8K / 16K / Custom tokens) with adjustable overlap to retain context across boundaries, and download all chunks as a ZIP.
 - **Markdown Preview:** Inspect rendered Markdown and raw text per file inside tabbed result cards.
-- **Detailed Statistics:** Per-file character count, word count, estimated token count, file size, conversion time, and OCR status.
+- **Detailed Statistics:** Per-file character count, word count, exact BPE token count (via `tiktoken`), file size, conversion time, and OCR status.
 - **Batch Downloads:** Download individual `.md` files or grab all successful conversions as a single ZIP archive.
 - **Session History:** Sidebar tracks your recent conversions during the session.
 - **How It Works:** Step-by-step visual guide on the landing page (Upload → Convert → OCR → Optimize → Use with LLMs).
@@ -91,6 +91,7 @@ All settings are available in the sidebar at runtime — no config files needed:
 | Setting | Description |
 |---|---|
 | **Chunk Size** | Split output into 4K / 8K / 16K / Custom token chunks for LLM context windows |
+| **Chunk Overlap** | Overlap between chunks (0-25%) to preserve context across boundaries |
 
 > **Note:** OCR fallback and Markdown optimization are currently **always-on automatic** to provide the best possible AI-ready output out of the box.
 
@@ -101,3 +102,4 @@ All settings are available in the sidebar at runtime — no config files needed:
 - [EasyOCR](https://github.com/JaidedAI/EasyOCR) — OCR for images and scanned PDFs
 - [pdf2image](https://github.com/Belval/pdf2image) — PDF page rendering for OCR
 - [Pillow](https://python-pillow.org/) — image processing
+- [tiktoken](https://github.com/openai/tiktoken) — exact BPE token counts for OpenAI models

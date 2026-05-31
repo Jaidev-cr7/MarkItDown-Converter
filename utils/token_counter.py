@@ -1,22 +1,42 @@
 """
 token_counter.py – Lightweight token estimation utilities.
 
-Uses a simple character-based heuristic (chars / 4) that approximates the
-GPT-3/4 tokeniser for English text.  No external dependency required.
+Uses tiktoken (cl100k_base) when available for accurate BPE token counts
+compatible with GPT-4 and Claude. Falls back to a character-based heuristic
+(chars / 4) when tiktoken is not installed.
 """
 
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# Backend selection (import-time, never crashes)
+# ---------------------------------------------------------------------------
 
-def estimate_tokens(text: str) -> int:
-    """Estimate the number of LLM tokens in *text*.
+try:
+    import tiktoken as _tiktoken
+    _enc = _tiktoken.get_encoding("cl100k_base")
 
-    Heuristic: ~4 characters per token (GPT-family average for English).
-    """
-    if not text:
-        return 0
-    return max(1, len(text) // 4)
+    def estimate_tokens(text: str) -> int:
+        """Return the exact BPE token count via tiktoken (cl100k_base)."""
+        if not text:
+            return 0
+        return len(_enc.encode(text))
 
+    TOKEN_BACKEND: str = "tiktoken"
+
+except ImportError:
+    def estimate_tokens(text: str) -> int:  # type: ignore[misc]
+        """Estimate token count using the chars/4 heuristic (GPT-family average)."""
+        if not text:
+            return 0
+        return max(1, len(text) // 4)
+
+    TOKEN_BACKEND: str = "heuristic"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def count_words(text: str) -> int:
     """Return a simple whitespace-split word count."""

@@ -10,18 +10,24 @@ from pathlib import Path
 from typing import Sequence
 
 
-def build_zip(md_paths: Sequence[Path]) -> bytes:
+def build_zip(md_paths: Sequence[Path]) -> tuple[bytes, list[str]]:
     """Create an in-memory ZIP archive containing every path in *md_paths*.
 
-    Returns the raw ZIP bytes ready to be passed to ``st.download_button``.
+    Returns:
+        (zip_bytes, skipped_names) – zip_bytes is ready for ``st.download_button``;
+        skipped_names lists any files that were missing on disk so the caller
+        can warn the user rather than silently delivering an incomplete archive.
     """
+    skipped: list[str] = []
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for path in md_paths:
             if path.exists():
                 zf.write(path, arcname=path.name)
+            else:
+                skipped.append(path.name)
     buffer.seek(0)
-    return buffer.read()
+    return buffer.read(), skipped
 
 
 def build_zip_from_strings(items: Sequence[tuple[str, str]]) -> bytes:

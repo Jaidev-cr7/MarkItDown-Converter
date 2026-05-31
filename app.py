@@ -13,7 +13,7 @@ import streamlit as st
 from utils.converter import FileConverter
 from utils.ocr_handler import ocr_available, needs_ocr_fallback, run_ocr
 from utils.optimizer import optimize_markdown, OptimizationStats, chunk_markdown, CHUNK_PRESETS
-from utils.token_counter import estimate_tokens, format_stat
+from utils.token_counter import estimate_tokens, format_stat, TOKEN_BACKEND
 from utils.zip_handler import build_zip, build_zip_from_strings
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,6 @@ html, body, [class*="css"] {
     color: #475569;
     font-weight: 600;
 }
-/* pills hidden — removed to save vertical space */
 .hero-pills { display: none; }
 
 /* ── Hero right panel ── */
@@ -190,9 +189,7 @@ html, body, [class*="css"] {
     margin-bottom: 1.2rem;
     transition: border-color 0.2s;
 }
-.upload-wrap:hover {
-    border-color: #818cf8;
-}
+.upload-wrap:hover { border-color: #818cf8; }
 .upload-heading {
     font-family: 'Inter', sans-serif;
     font-size: 1rem;
@@ -274,6 +271,19 @@ html, body, [class*="css"] {
     font-family: 'JetBrains Mono', monospace;
 }
 
+/* ── Token backend badge ── */
+.token-backend {
+    display: inline-block;
+    background: rgba(34,211,238,0.08);
+    border: 1px solid rgba(34,211,238,0.3);
+    border-radius: 6px;
+    padding: 3px 9px;
+    font-size: 0.68rem;
+    color: #0e7490;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+}
+
 /* ── Result card ── */
 .r-card {
     border: 1.5px solid #e2e8f0;
@@ -281,7 +291,7 @@ html, body, [class*="css"] {
     padding: 1.25rem 1.4rem 0.7rem 1.4rem;
     margin-bottom: 1.3rem;
     background: #ffffff;
-    box-shadow: 0 1px 4px rgba(15,23,42,0.04), 0 0 0 0 rgba(99,102,241,0);
+    box-shadow: 0 1px 4px rgba(15,23,42,0.04);
     transition: box-shadow 0.2s, border-color 0.2s;
 }
 .r-card:hover {
@@ -368,12 +378,7 @@ html, body, [class*="css"] {
     border-bottom: 1px solid #f1f5f9;
 }
 .hiw-row:last-child { border-bottom: none; }
-.hiw-icon {
-    font-size: 0.95rem;
-    flex-shrink: 0;
-    margin-top: 1px;
-}
-.hiw-text {}
+.hiw-icon { font-size: 0.95rem; flex-shrink: 0; margin-top: 1px; }
 .hiw-step {
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.68rem;
@@ -382,11 +387,7 @@ html, body, [class*="css"] {
     margin-bottom: 0;
     line-height: 1.3;
 }
-.hiw-desc-sm {
-    font-size: 0.68rem;
-    color: #94a3b8;
-    line-height: 1.35;
-}
+.hiw-desc-sm { font-size: 0.68rem; color: #94a3b8; line-height: 1.35; }
 
 /* ── Empty state ── */
 .empty-state {
@@ -411,7 +412,6 @@ html, body, [class*="css"] {
 @media (prefers-color-scheme: dark) {
     .hero-sub { color: #94a3b8; }
     .hero-sub strong { color: #cbd5e1; }
-    .hero-pill { background: #1e293b; border-color: #334155; color: #94a3b8; }
     .hero-panel {
         background: rgba(15,23,42,0.65);
         border-color: rgba(99,102,241,0.25);
@@ -449,9 +449,13 @@ with st.sidebar:
         '<div class="sb-tagline">Convert documents into AI-ready Markdown</div>',
         unsafe_allow_html=True,
     )
+
+    # Show which token backend is active
+    backend_label = "tiktoken (exact)" if TOKEN_BACKEND == "tiktoken" else "heuristic (chars/4)"
     st.markdown(
-        '<div class="sb-status">✓ OCR Ready</div>'
-        '<div class="sb-status">✓ Optimization Ready</div>',
+        f'<div class="sb-status">✓ OCR Ready</div>'
+        f'<div class="sb-status">✓ Optimization Ready</div>'
+        f'<div class="sb-status">✓ Tokens: {backend_label}</div>',
         unsafe_allow_html=True,
     )
 
@@ -470,6 +474,26 @@ with st.sidebar:
         custom_chunk_size = st.number_input(
             "Custom token limit", min_value=500, max_value=128000, value=4000, step=500
         )
+
+    # ── Chunk Overlap ──
+    if chunk_option != "None":
+        st.markdown(
+            '<span class="sec-label" style="margin-top:0.6rem">Chunk Overlap</span>',
+            unsafe_allow_html=True,
+        )
+        overlap_pct = st.slider(
+            "Overlap %",
+            min_value=0,
+            max_value=25,
+            value=10,
+            step=5,
+            label_visibility="collapsed",
+            help="Percentage of each chunk's tokens to repeat at the start of the next chunk. "
+                 "Helps LLMs retain context across boundaries. 0 = no overlap.",
+        )
+        st.caption(f"~{overlap_pct}% of chunk size repeated between chunks")
+    else:
+        overlap_pct = 0
 
     st.markdown("---")
 
@@ -528,7 +552,7 @@ with st.sidebar:
             st.rerun()
 
 # ---------------------------------------------------------------------------
-# Hero  (two-column: left = title/pills, right = info panel)
+# Hero
 # ---------------------------------------------------------------------------
 
 hero_left, hero_right = st.columns([1.05, 0.95], gap="large")
@@ -582,7 +606,7 @@ with col_clr:
         st.rerun()
 
 # ---------------------------------------------------------------------------
-# Chunk size resolver
+# Chunk size + overlap resolver
 # ---------------------------------------------------------------------------
 
 def _resolve_chunk_size() -> int | None:
@@ -591,6 +615,11 @@ def _resolve_chunk_size() -> int | None:
     if chunk_option == "Custom":
         return custom_chunk_size
     return CHUNK_PRESETS.get(chunk_option)
+
+
+def _resolve_overlap(chunk_size: int) -> int:
+    """Convert the sidebar overlap percentage to an absolute token count."""
+    return max(0, int(chunk_size * overlap_pct / 100))
 
 # ---------------------------------------------------------------------------
 # Conversion (OCR + Optimization always-on)
@@ -652,13 +681,15 @@ if results:
 
     successful = [r for r in results if r.success and r.output_path]
     if len(successful) > 1:
-        zip_bytes = build_zip([r.output_path for r in successful])
+        zip_bytes, skipped = build_zip([r.output_path for r in successful])
         st.download_button(
             "⬇  Download All as ZIP",
             data=zip_bytes,
             file_name="converted_markdown.zip",
             mime="application/zip",
         )
+        if skipped:
+            st.warning(f"⚠️ {len(skipped)} file(s) were missing from disk and excluded from the ZIP: {', '.join(skipped)}")
         st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
 
     for result in results:
@@ -691,7 +722,7 @@ if results:
             st.error(f"Conversion failed: {result.error}")
             continue
 
-        # Stats row
+        # Stats row — token count now comes from the consistent token_counter backend
         st.markdown(
             f'<span class="stat-chip">~{format_stat(result.token_estimate)} tokens</span>'
             f'<span class="stat-chip">{format_stat(result.word_count)} words</span>'
@@ -800,19 +831,21 @@ if results:
             if chunk_size is None:
                 st.info("Select a chunk size in the sidebar to split this document.")
             else:
+                overlap_tok = _resolve_overlap(chunk_size)
                 if st.button("🔀 Generate Chunks", key=f"chunk_{result.source_name}"):
                     source_text = result.markdown
                     opt_local = st.session_state.get(f"opt_result_{result.source_name}")
                     if opt_local:
                         source_text = opt_local[0]
-                    chunks = chunk_markdown(source_text, chunk_size)
+                    chunks = chunk_markdown(source_text, chunk_size, overlap_tokens=overlap_tok)
                     st.session_state[f"chunks_{result.source_name}"] = chunks
 
                 chunks = st.session_state.get(f"chunks_{result.source_name}")
                 if chunks:
+                    overlap_note = f", ~{overlap_pct}% overlap" if overlap_tok > 0 else ""
                     st.caption(
                         f"Generated **{len(chunks)}** chunks "
-                        f"(≤ {format_stat(chunk_size)} tokens each)"
+                        f"(≤ {format_stat(chunk_size)} tokens each{overlap_note})"
                     )
                     stem = Path(result.source_name).stem
                     chunk_items = [
