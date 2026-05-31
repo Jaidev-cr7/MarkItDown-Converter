@@ -1,9 +1,10 @@
+# Virtual environment
 venv/
+
+# Python cache
 __pycache__/
 *.pyc
 
-uploads/*
-converted/*
-
-!uploads/.gitkeep
-!converted/.gitkeep
+# Temporary application files
+tmp/*
+!tmp/.gitkeep
