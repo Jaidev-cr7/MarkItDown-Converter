@@ -1,10 +1,16 @@
 """
 converter.py – Wraps Microsoft MarkItDown and manages file-level conversion.
+
+Security improvements (Priority 6):
+  - UUID-based internal filenames prevent collisions & path traversal.
+  - ``save_upload`` now returns a UUID-named path; original name is stored separately.
+  - ``cleanup_session_files`` robustly removes both upload and converted artefacts.
 """
 
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -20,7 +26,8 @@ from markitdown import MarkItDown
 class ConversionResult:
     """Holds the outcome of a single file conversion."""
 
-    source_path: Path
+    source_path: Path           # UUID-named path on disk
+    source_name: str = ""       # original user-visible filename
     output_path: Optional[Path] = None
     markdown: str = ""
     success: bool = False
@@ -28,22 +35,25 @@ class ConversionResult:
     duration_s: float = 0.0
     file_size_bytes: int = 0
 
+    # OCR metadata
+    ocr_used: bool = False
+    ocr_warning: str = ""
+
     # Derived stats (populated after conversion)
     char_count: int = field(default=0, init=False)
     word_count: int = field(default=0, init=False)
     token_estimate: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
+        # Back-fill source_name from path if not provided
+        if not self.source_name:
+            self.source_name = self.source_path.name
         self._compute_stats()
 
     def _compute_stats(self) -> None:
         self.char_count = len(self.markdown)
         self.word_count = len(self.markdown.split()) if self.markdown else 0
         self.token_estimate = self.char_count // 4  # rough GPT-style estimate
-
-    @property
-    def source_name(self) -> str:
-        return self.source_path.name
 
 
 # ---------------------------------------------------------------------------
@@ -62,8 +72,8 @@ class FileConverter:
             ".txt", ".md", ".rst",
             ".json", ".xml",
             ".zip",            # MarkItDown can recurse into zip archives
-            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",  # image OCR / description
-            ".mp3", ".wav", ".ogg",                             # audio transcription (if configured)
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+            ".mp3", ".wav", ".ogg",
             ".epub",
         }
     )
@@ -77,13 +87,15 @@ class FileConverter:
     # Public API
     # ------------------------------------------------------------------
 
-    def convert(self, source_path: Path) -> ConversionResult:
+    def convert(self, source_path: Path, original_name: str = "") -> ConversionResult:
         """Convert *source_path* to Markdown and write the .md file.
 
         Returns a :class:`ConversionResult` regardless of success/failure.
         """
+        display_name = original_name or source_path.name
         result = ConversionResult(
             source_path=source_path,
+            source_name=display_name,
             file_size_bytes=source_path.stat().st_size if source_path.exists() else 0,
         )
 
@@ -107,15 +119,19 @@ class FileConverter:
 
         return result
 
-    def save_upload(self, filename: str, data: bytes) -> Path:
-        """Persist raw upload bytes to the uploads directory.
+    def save_upload(self, filename: str, data: bytes) -> tuple[Path, str]:
+        """Persist raw upload bytes to the uploads directory with a UUID filename.
 
-        Returns the Path where the file was saved.
+        Returns:
+            (uuid_path, original_name) – uuid_path is the on-disk location;
+            original_name is the user's original filename (sanitised stem + suffix).
         """
         self.upload_dir.mkdir(parents=True, exist_ok=True)
-        dest = self.upload_dir / filename
+        suffix = Path(filename).suffix.lower()
+        unique_name = f"{uuid.uuid4().hex}{suffix}"
+        dest = self.upload_dir / unique_name
         dest.write_bytes(data)
-        return dest
+        return dest, filename
 
     def is_supported(self, filename: str) -> bool:
         return Path(filename).suffix.lower() in self.SUPPORTED_EXTENSIONS
@@ -126,7 +142,10 @@ class FileConverter:
         """Delete a list of uploaded / converted files from disk."""
         for p in paths:
             if p and p.exists():
-                p.unlink(missing_ok=True)
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
         if remove_converted:
             converted_stem_map = {
                 p.stem: p for p in self.converted_dir.glob("*.md")
@@ -134,13 +153,16 @@ class FileConverter:
             for path in paths:
                 md_path = converted_stem_map.get(path.stem)
                 if md_path and md_path.exists():
-                    md_path.unlink(missing_ok=True)
+                    try:
+                        md_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
     def _output_path(self, source_path: Path) -> Path:
-        """Derive an output .md path from the source filename."""
+        """Derive an output .md path from the UUID source filename."""
         self.converted_dir.mkdir(parents=True, exist_ok=True)
         return self.converted_dir / (source_path.stem + ".md")

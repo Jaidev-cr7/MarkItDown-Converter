@@ -1,568 +1,870 @@
 """
-app.py – LLM Markdown Converter
-A Streamlit application that converts documents to Markdown using
-Microsoft MarkItDown, with preview, stats, and download capabilities.
+app.py – MarkItDown Streamlit UI
+Integrates OCR fallback, Markdown optimization, smart chunking, and copy features.
+OCR and Optimization are always-on automatic.
 """
 
 from __future__ import annotations
 
-import datetime
 from pathlib import Path
-from typing import Any
 
 import streamlit as st
 
-from utils.converter import ConversionResult, FileConverter
-from utils.token_counter import count_chars, count_words, estimate_tokens, format_stat
-from utils.zip_handler import build_zip_from_strings
-
-# ---------------------------------------------------------------------------
-# Paths (relative to this file so the app works from any working directory)
-# ---------------------------------------------------------------------------
-
-BASE_DIR = Path(__file__).parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-CONVERTED_DIR = BASE_DIR / "converted"
-
-UPLOAD_DIR.mkdir(exist_ok=True)
-CONVERTED_DIR.mkdir(exist_ok=True)
+from utils.converter import FileConverter
+from utils.ocr_handler import ocr_available, needs_ocr_fallback, run_ocr
+from utils.optimizer import optimize_markdown, OptimizationStats, chunk_markdown, CHUNK_PRESETS
+from utils.token_counter import estimate_tokens, format_stat
+from utils.zip_handler import build_zip, build_zip_from_strings
 
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="LLM Markdown Converter",
-    page_icon="⚡",
+    page_title="MarkItDown Converter",
+    page_icon="📄",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ---------------------------------------------------------------------------
-# Custom CSS
+# Directories
 # ---------------------------------------------------------------------------
 
-st.markdown(
-    """
-    <style>
-    /* ── Google Font ───────────────────────────────────────────────────── */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
-
-    /* ── Base / Background ─────────────────────────────────────────────── */
-    .stApp {
-        background: linear-gradient(135deg, #0d0d1a 0%, #111128 50%, #0a0a18 100%);
-        color: #e2e8f0;
-    }
-
-    /* ── Sidebar ───────────────────────────────────────────────────────── */
-    section[data-testid="stSidebar"] {
-        background: rgba(15, 15, 35, 0.95) !important;
-        border-right: 1px solid rgba(99, 102, 241, 0.2);
-    }
-
-    /* ── Hero header ───────────────────────────────────────────────────── */
-    .hero-header {
-        text-align: center;
-        padding: 2rem 0 1rem;
-    }
-    .hero-header h1 {
-        font-size: 2.6rem;
-        font-weight: 700;
-        background: linear-gradient(90deg, #818cf8, #c084fc, #38bdf8);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin-bottom: 0.3rem;
-    }
-    .hero-header p {
-        color: #94a3b8;
-        font-size: 1rem;
-        margin-top: 0;
-    }
-
-    /* ── Stat cards ────────────────────────────────────────────────────── */
-    .stat-card {
-        background: rgba(99, 102, 241, 0.08);
-        border: 1px solid rgba(99, 102, 241, 0.25);
-        border-radius: 12px;
-        padding: 1rem 1.2rem;
-        text-align: center;
-        transition: border-color 0.2s;
-    }
-    .stat-card:hover { border-color: rgba(99, 102, 241, 0.55); }
-    .stat-card .label {
-        font-size: 0.72rem;
-        font-weight: 600;
-        letter-spacing: 0.08em;
-        color: #94a3b8;
-        text-transform: uppercase;
-    }
-    .stat-card .value {
-        font-size: 1.55rem;
-        font-weight: 700;
-        color: #a5b4fc;
-        margin-top: 0.15rem;
-    }
-
-    /* ── File result card ──────────────────────────────────────────────── */
-    .file-card {
-        background: rgba(17, 17, 40, 0.8);
-        border: 1px solid rgba(99, 102, 241, 0.2);
-        border-radius: 14px;
-        padding: 1.2rem 1.4rem;
-        margin-bottom: 1rem;
-        transition: box-shadow 0.2s, border-color 0.2s;
-    }
-    .file-card:hover {
-        box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.4);
-        border-color: rgba(99, 102, 241, 0.4);
-    }
-    .file-card.success { border-left: 4px solid #34d399; }
-    .file-card.error   { border-left: 4px solid #f87171; }
-
-    .file-name {
-        font-weight: 600;
-        font-size: 1rem;
-        color: #e2e8f0;
-        margin-bottom: 0.3rem;
-    }
-    .badge {
-        display: inline-block;
-        border-radius: 20px;
-        padding: 0.15rem 0.65rem;
-        font-size: 0.72rem;
-        font-weight: 600;
-    }
-    .badge-success { background: rgba(52, 211, 153, 0.15); color: #34d399; }
-    .badge-error   { background: rgba(248, 113, 113, 0.15); color: #f87171; }
-    .badge-info    { background: rgba(56, 189, 248, 0.15);  color: #38bdf8; }
-
-    /* ── Markdown preview area ─────────────────────────────────────────── */
-    .preview-box {
-        background: rgba(10, 10, 25, 0.6);
-        border: 1px solid rgba(99, 102, 241, 0.2);
-        border-radius: 12px;
-        padding: 1.4rem 1.6rem;
-        max-height: 520px;
-        overflow-y: auto;
-        font-size: 0.9rem;
-        line-height: 1.7;
-        color: #cbd5e1;
-    }
-
-    /* ── History list ──────────────────────────────────────────────────── */
-    .history-item {
-        border-bottom: 1px solid rgba(99, 102, 241, 0.1);
-        padding: 0.5rem 0;
-        font-size: 0.85rem;
-        color: #94a3b8;
-    }
-    .history-item span.ok   { color: #34d399; font-weight: 600; }
-    .history-item span.fail { color: #f87171; font-weight: 600; }
-
-    /* ── Upload section label ──────────────────────────────────────────── */
-    .section-title {
-        font-size: 0.78rem;
-        font-weight: 700;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        color: #7c7f9e;
-        margin-bottom: 0.6rem;
-    }
-
-    /* ── Scrollbar ─────────────────────────────────────────────────────── */
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(99, 102, 241, 0.4); border-radius: 3px; }
-
-    /* ── Streamlit element overrides ───────────────────────────────────── */
-    div[data-testid="stFileUploader"] {
-        border: 2px dashed rgba(99, 102, 241, 0.4) !important;
-        border-radius: 14px !important;
-        padding: 1.5rem !important;
-        background: rgba(99, 102, 241, 0.04) !important;
-        transition: border-color 0.2s;
-    }
-    div[data-testid="stFileUploader"]:hover {
-        border-color: rgba(99, 102, 241, 0.7) !important;
-    }
-
-    div[data-testid="stExpander"] {
-        background: rgba(17, 17, 40, 0.6) !important;
-        border: 1px solid rgba(99, 102, 241, 0.15) !important;
-        border-radius: 10px !important;
-    }
-
-    .stButton > button {
-        border-radius: 8px !important;
-        font-weight: 600 !important;
-        transition: all 0.18s ease !important;
-    }
-    .stButton > button:hover { transform: translateY(-1px); }
-
-    /* Progress bar colour */
-    div[data-testid="stProgressBar"] > div {
-        background: linear-gradient(90deg, #818cf8, #c084fc) !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+UPLOAD_DIR = Path("tmp/uploads")
+CONVERTED_DIR = Path("tmp/converted")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+CONVERTED_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Session state initialisation
+# Session state defaults
 # ---------------------------------------------------------------------------
 
 def _init_state() -> None:
-    defaults: dict[str, Any] = {
-        "results": [],          # list[ConversionResult] for current batch
-        "history": [],          # list[dict] – lightweight session history
-        "preview_index": None,  # which result is being previewed
+    defaults = {
+        "results": [],
+        "history": [],
     }
-    for key, value in defaults.items():
+    for key, val in defaults.items():
         if key not in st.session_state:
-            st.session_state[key] = value
-
+            st.session_state[key] = val
 
 _init_state()
 
 # ---------------------------------------------------------------------------
-# Converter singleton (cached per session)
+# Converter singleton
 # ---------------------------------------------------------------------------
 
 @st.cache_resource
 def get_converter() -> FileConverter:
-    return FileConverter(upload_dir=UPLOAD_DIR, converted_dir=CONVERTED_DIR)
-
+    return FileConverter(UPLOAD_DIR, CONVERTED_DIR)
 
 converter = get_converter()
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# Custom CSS
 # ---------------------------------------------------------------------------
 
-def _human_size(num_bytes: int) -> str:
-    """Return a human-readable file size string."""
-    for unit in ("B", "KB", "MB", "GB"):
-        if abs(num_bytes) < 1024:
-            return f"{num_bytes:.1f} {unit}"
-        num_bytes /= 1024  # type: ignore[assignment]
-    return f"{num_bytes:.1f} TB"
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap');
 
+/* ── Global ── */
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
 
-def _append_history(result: ConversionResult) -> None:
-    st.session_state.history.append(
-        {
-            "filename": result.source_name,
-            "status": "✅ OK" if result.success else "❌ Failed",
-            "tokens": result.token_estimate,
-            "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
-        }
-    )
+/* ── Hero ── */
+.hero-left {
+    padding: 0.55rem 0 0.4rem 0;
+}
+.hero-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.66rem;
+    font-weight: 500;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #818cf8;
+    background: rgba(99,102,241,0.09);
+    border: 1px solid rgba(99,102,241,0.22);
+    border-radius: 99px;
+    padding: 3px 10px;
+    margin-bottom: 0.45rem;
+}
+.hero-title {
+    font-family: 'Inter', sans-serif;
+    font-size: 1.9rem;
+    font-weight: 800;
+    line-height: 1.1;
+    letter-spacing: -1.2px;
+    background: linear-gradient(135deg, #6366f1 0%, #a78bfa 45%, #22d3ee 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0.35rem;
+}
+.hero-sub {
+    font-size: 0.82rem;
+    font-weight: 400;
+    color: #64748b;
+    line-height: 1.5;
+    margin-bottom: 0;
+}
+.hero-sub strong {
+    color: #475569;
+    font-weight: 600;
+}
+/* pills hidden — removed to save vertical space */
+.hero-pills { display: none; }
 
+/* ── Hero right panel ── */
+.hero-panel {
+    background: rgba(255,255,255,0.55);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1.5px solid rgba(199,210,254,0.6);
+    border-radius: 14px;
+    padding: 0.75rem 1rem;
+    margin-top: 0.55rem;
+    box-shadow:
+        0 4px 24px rgba(99,102,241,0.07),
+        inset 0 1px 0 rgba(255,255,255,0.6);
+}
+.hero-panel-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.62rem;
+    font-weight: 700;
+    color: #818cf8;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 0.45rem;
+}
+.panel-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.28rem 0;
+    border-bottom: 1px solid rgba(226,232,240,0.5);
+}
+.panel-item:last-child { border-bottom: none; }
+.panel-icon { font-size: 0.88rem; flex-shrink: 0; }
+.panel-text {
+    font-size: 0.78rem;
+    color: #334155;
+    font-weight: 500;
+    line-height: 1.3;
+}
 
-def _clear_all() -> None:
-    """Remove all session results and their files from disk."""
-    paths = [r.source_path for r in st.session_state.results]
-    converter.cleanup_session_files(paths)
-    st.session_state.results = []
-    st.session_state.preview_index = None
+/* ── Footer ── */
+.footer {
+    text-align: center;
+    padding: 2.5rem 0 1.5rem 0;
+    margin-top: 1rem;
+    border-top: 1px solid #f1f5f9;
+}
+.footer-main {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    font-weight: 500;
+    opacity: 0.85;
+    margin-bottom: 0.25rem;
+}
+.footer-main a { color: #818cf8; text-decoration: none; }
+.footer-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: #cbd5e1;
+    opacity: 0.7;
+    letter-spacing: 0.5px;
+}
 
+/* ── Upload zone ── */
+.upload-wrap {
+    background: linear-gradient(135deg, rgba(99,102,241,0.03) 0%, rgba(34,211,238,0.03) 100%);
+    border: 2px dashed #c7d2fe;
+    border-radius: 18px;
+    padding: 2rem 1.5rem 1.4rem 1.5rem;
+    margin-bottom: 1.2rem;
+    transition: border-color 0.2s;
+}
+.upload-wrap:hover {
+    border-color: #818cf8;
+}
+.upload-heading {
+    font-family: 'Inter', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #334155;
+    text-align: center;
+    margin-bottom: 0.25rem;
+}
+.upload-sub {
+    font-size: 0.78rem;
+    color: #94a3b8;
+    text-align: center;
+    margin-bottom: 0.9rem;
+}
+.fmt-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    justify-content: center;
+    margin-bottom: 1rem;
+}
+.fmt-pill {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.64rem;
+    font-weight: 500;
+    background: rgba(99,102,241,0.07);
+    border: 1px solid rgba(99,102,241,0.18);
+    color: #6366f1;
+    border-radius: 5px;
+    padding: 2px 8px;
+}
 
-def _render_stat_cards(result: ConversionResult) -> None:
-    c1, c2, c3, c4 = st.columns(4)
-    stats = [
-        ("File Size",   _human_size(result.file_size_bytes)),
-        ("Characters",  format_stat(result.char_count)),
-        ("Words",       format_stat(result.word_count)),
-        ("~Tokens",     format_stat(result.token_estimate)),
-    ]
-    for col, (label, value) in zip([c1, c2, c3, c4], stats):
-        col.markdown(
-            f"""
-            <div class="stat-card">
-                <div class="label">{label}</div>
-                <div class="value">{value}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+/* ── Section label ── */
+.sec-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: #94a3b8;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    display: block;
+    margin-bottom: 0.55rem;
+}
 
+/* ── Stat chips ── */
+.stat-chip {
+    display: inline-block;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 3px 9px;
+    font-size: 0.75rem;
+    color: #475569;
+    margin-right: 4px;
+    margin-bottom: 4px;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── OCR badge ── */
+.ocr-yes {
+    display: inline-block;
+    background: rgba(254,243,199,0.7);
+    border: 1px solid #fbbf24;
+    border-radius: 6px;
+    padding: 3px 9px;
+    font-size: 0.7rem;
+    color: #92400e;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+}
+.ocr-no {
+    display: inline-block;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 3px 9px;
+    font-size: 0.7rem;
+    color: #94a3b8;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── Result card ── */
+.r-card {
+    border: 1.5px solid #e2e8f0;
+    border-radius: 16px;
+    padding: 1.25rem 1.4rem 0.7rem 1.4rem;
+    margin-bottom: 1.3rem;
+    background: #ffffff;
+    box-shadow: 0 1px 4px rgba(15,23,42,0.04), 0 0 0 0 rgba(99,102,241,0);
+    transition: box-shadow 0.2s, border-color 0.2s;
+}
+.r-card:hover {
+    box-shadow: 0 4px 20px rgba(15,23,42,0.08);
+    border-color: #c7d2fe;
+}
+.r-card-ok  { border-left: 4px solid #22c55e; }
+.r-card-err { border-left: 4px solid #ef4444; }
+.r-filename {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 0.3rem;
+    word-break: break-all;
+}
+
+/* ── Optimization stats ── */
+.opt-row {
+    display: flex;
+    gap: 0.7rem;
+    flex-wrap: wrap;
+    margin: 0.8rem 0 0.9rem 0;
+}
+.opt-cell {
+    flex: 1;
+    min-width: 88px;
+    background: #f8fafc;
+    border: 1.5px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 0.65rem 0.8rem;
+    text-align: center;
+}
+.opt-cell .lbl {
+    font-size: 0.62rem;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 0.2rem;
+    font-family: 'JetBrains Mono', monospace;
+}
+.opt-cell .val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #1e293b;
+}
+.opt-cell.green { background: rgba(220,252,231,0.5); border-color: #86efac; }
+.opt-cell.green .val { color: #15803d; }
+
+/* ── Sidebar ── */
+.sb-brand {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #6366f1, #a78bfa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0.15rem;
+}
+.sb-tagline {
+    font-size: 0.72rem;
+    color: #64748b;
+    line-height: 1.45;
+    margin-bottom: 0.75rem;
+}
+.sb-status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: #16a34a;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 2px;
+}
+
+/* ── Compact How It Works (sidebar) ── */
+.hiw-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+.hiw-row:last-child { border-bottom: none; }
+.hiw-icon {
+    font-size: 0.95rem;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+.hiw-text {}
+.hiw-step {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: #334155;
+    margin-bottom: 0;
+    line-height: 1.3;
+}
+.hiw-desc-sm {
+    font-size: 0.68rem;
+    color: #94a3b8;
+    line-height: 1.35;
+}
+
+/* ── Empty state ── */
+.empty-state {
+    text-align: center;
+    padding: 3.5rem 2rem;
+    border: 2px dashed #e2e8f0;
+    border-radius: 18px;
+    margin-top: 0.5rem;
+    background: rgba(248,250,252,0.5);
+}
+.empty-icon { font-size: 3rem; margin-bottom: 0.75rem; }
+.empty-title {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #475569;
+    margin-bottom: 0.35rem;
+}
+.empty-sub { font-size: 0.8rem; color: #94a3b8; }
+
+/* ── Dark mode overrides ── */
+@media (prefers-color-scheme: dark) {
+    .hero-sub { color: #94a3b8; }
+    .hero-sub strong { color: #cbd5e1; }
+    .hero-pill { background: #1e293b; border-color: #334155; color: #94a3b8; }
+    .hero-panel {
+        background: rgba(15,23,42,0.65);
+        border-color: rgba(99,102,241,0.25);
+        box-shadow: 0 4px 24px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.05);
+    }
+    .panel-text { color: #cbd5e1; }
+    .panel-item { border-bottom-color: rgba(51,65,85,0.6); }
+    .upload-wrap { background: rgba(99,102,241,0.04); border-color: #3730a3; }
+    .upload-heading { color: #e2e8f0; }
+    .r-card { background: #0f172a; border-color: #1e293b; }
+    .r-filename { color: #f1f5f9; }
+    .stat-chip { background: #1e293b; border-color: #334155; color: #94a3b8; }
+    .opt-cell { background: #1e293b; border-color: #334155; }
+    .opt-cell .val { color: #f1f5f9; }
+    .opt-cell.green { background: rgba(20,83,45,0.3); border-color: #166534; }
+    .opt-cell.green .val { color: #4ade80; }
+    .hiw-row { border-bottom-color: #1e293b; }
+    .hiw-step { color: #cbd5e1; }
+    .empty-state { background: rgba(15,23,42,0.5); border-color: #1e293b; }
+    .empty-title { color: #94a3b8; }
+    .footer { border-top-color: #1e293b; }
+    .footer-main { color: #64748b; }
+    .footer-sub { color: #475569; }
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
+    st.markdown('<div class="sb-brand">◈ MarkItDown</div>', unsafe_allow_html=True)
     st.markdown(
-        """
-        <div style="text-align:center;padding:1rem 0 1.5rem;">
-            <div style="font-size:2.4rem;">⚡</div>
-            <div style="font-size:1.1rem;font-weight:700;color:#a5b4fc;">LLM Markdown</div>
-            <div style="font-size:0.75rem;color:#64748b;">Converter</div>
-        </div>
-        """,
+        '<div class="sb-tagline">Convert documents into AI-ready Markdown</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="sb-status">✓ OCR Ready</div>'
+        '<div class="sb-status">✓ Optimization Ready</div>',
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="section-title">Supported formats</div>', unsafe_allow_html=True)
-    formats_cols = st.columns(2)
-    left_fmts = ["PDF", "DOCX / DOC", "PPTX / PPT", "XLSX / XLS", "CSV"]
-    right_fmts = ["HTML / HTM", "TXT / MD", "JSON / XML", "Images (OCR)", "EPUB"]
-    for col, fmts in zip(formats_cols, [left_fmts, right_fmts]):
-        for f in fmts:
-            col.markdown(f"<small>• {f}</small>", unsafe_allow_html=True)
+    st.markdown("---")
 
-    st.divider()
+    # ── Smart Chunking ──
+    st.markdown('<span class="sec-label">Smart Chunking</span>', unsafe_allow_html=True)
+    chunk_option = st.selectbox(
+        "Chunk Size",
+        options=["None", "4K tokens", "8K tokens", "16K tokens", "Custom"],
+        index=0,
+        label_visibility="collapsed",
+    )
+    custom_chunk_size = None
+    if chunk_option == "Custom":
+        custom_chunk_size = st.number_input(
+            "Custom token limit", min_value=500, max_value=128000, value=4000, step=500
+        )
 
-    # Session summary
-    results: list[ConversionResult] = st.session_state.results
-    n_ok   = sum(1 for r in results if r.success)
-    n_fail = sum(1 for r in results if not r.success)
+    st.markdown("---")
 
-    st.markdown('<div class="section-title">Session summary</div>', unsafe_allow_html=True)
-    m1, m2 = st.columns(2)
-    m1.metric("Converted", n_ok)
-    m2.metric("Failed", n_fail)
-
-    if results:
-        total_tokens = sum(r.token_estimate for r in results if r.success)
-        st.markdown(f"<small>Total ~tokens: **{format_stat(total_tokens)}**</small>", unsafe_allow_html=True)
-
-    st.divider()
-
-    # Session history
-    st.markdown('<div class="section-title">History</div>', unsafe_allow_html=True)
-    history: list[dict] = st.session_state.history
-    if not history:
-        st.caption("No conversions yet.")
-    else:
-        for entry in reversed(history[-20:]):  # show latest 20
-            status_cls = "ok" if "OK" in entry["status"] else "fail"
-            st.markdown(
-                f"""<div class="history-item">
-                    {entry['timestamp']} &nbsp;
-                    <span class="{status_cls}">{entry['status']}</span>
-                    &nbsp;{entry['filename']}
-                    &nbsp;<span style="color:#7c7f9e">~{format_stat(entry['tokens'])} tok</span>
-                </div>""",
-                unsafe_allow_html=True,
-            )
-
-# ---------------------------------------------------------------------------
-# Main content
-# ---------------------------------------------------------------------------
-
-# Hero header
-st.markdown(
-    """
-    <div class="hero-header">
-        <h1>⚡ LLM Markdown Converter</h1>
-        <p>Convert any document to clean Markdown — ready for ChatGPT, Claude, Gemini, NotebookLM & more.</p>
+    # ── Compact How It Works ──
+    st.markdown('<span class="sec-label">How It Works</span>', unsafe_allow_html=True)
+    st.markdown("""
+    <div>
+      <div class="hiw-row">
+        <div class="hiw-icon">📁</div>
+        <div class="hiw-text">
+          <div class="hiw-step">Upload</div>
+          <div class="hiw-desc-sm">Drop any file type</div>
+        </div>
+      </div>
+      <div class="hiw-row">
+        <div class="hiw-icon">⚙️</div>
+        <div class="hiw-text">
+          <div class="hiw-step">Convert</div>
+          <div class="hiw-desc-sm">Extract structured Markdown</div>
+        </div>
+      </div>
+      <div class="hiw-row">
+        <div class="hiw-icon">🔍</div>
+        <div class="hiw-text">
+          <div class="hiw-step">OCR</div>
+          <div class="hiw-desc-sm">Automatic text extraction</div>
+        </div>
+      </div>
+      <div class="hiw-row">
+        <div class="hiw-icon">✨</div>
+        <div class="hiw-text">
+          <div class="hiw-step">Optimize</div>
+          <div class="hiw-desc-sm">Reduce token usage</div>
+        </div>
+      </div>
+      <div class="hiw-row">
+        <div class="hiw-icon">🤖</div>
+        <div class="hiw-text">
+          <div class="hiw-step">Ready</div>
+          <div class="hiw-desc-sm">Use with ChatGPT, Claude, Gemini</div>
+        </div>
+      </div>
     </div>
-    """,
-    unsafe_allow_html=True,
-)
+    """, unsafe_allow_html=True)
 
-st.divider()
+    st.markdown("---")
 
-# ── Upload ──────────────────────────────────────────────────────────────────
+    # ── Recent Conversions ──
+    if st.session_state.history:
+        st.markdown('<span class="sec-label">Recent Conversions</span>', unsafe_allow_html=True)
+        for item in reversed(st.session_state.history[-10:]):
+            icon = "✅" if item["success"] else "❌"
+            st.caption(f"{icon} {item['name']}")
+        if st.button("Clear History", use_container_width=True):
+            st.session_state.history = []
+            st.rerun()
 
-st.markdown('<div class="section-title">📂 Upload files</div>', unsafe_allow_html=True)
+# ---------------------------------------------------------------------------
+# Hero  (two-column: left = title/pills, right = info panel)
+# ---------------------------------------------------------------------------
+
+hero_left, hero_right = st.columns([1.05, 0.95], gap="large")
+
+with hero_left:
+    st.markdown("""
+    <div class="hero-left">
+      <div class="hero-eyebrow">⚡ Powered by Microsoft MarkItDown</div>
+      <div class="hero-title">Document → Markdown</div>
+      <div class="hero-sub">
+        Convert any file into AI-ready Markdown with automatic OCR and token optimization.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with hero_right:
+    st.markdown("""
+    <div class="hero-panel">
+      <div class="hero-panel-title">Why MarkItDown?</div>
+      <div class="panel-item"><span class="panel-icon">📄</span><span class="panel-text">✓ 15+ File Formats</span></div>
+      <div class="panel-item"><span class="panel-icon">🔍</span><span class="panel-text">✓ Automatic OCR</span></div>
+      <div class="panel-item"><span class="panel-icon">✨</span><span class="panel-text">✓ Token Optimization</span></div>
+      <div class="panel-item"><span class="panel-icon">🔀</span><span class="panel-text">✓ Smart Chunking</span></div>
+      <div class="panel-item"><span class="panel-icon">🤖</span><span class="panel-text">✓ AI Ready</span></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# Upload zone
+# ---------------------------------------------------------------------------
+
+st.markdown("""
+<div class="upload-wrap">
+  <div class="upload-heading">Drag &amp; Drop Files Here</div>
+  <div class="upload-sub">PDF · DOCX · PPTX · XLSX · CSV · HTML · TXT · JSON · JPG · PNG · WEBP · EPUB · ZIP and more</div>
+</div>
+""", unsafe_allow_html=True)
 
 uploaded_files = st.file_uploader(
-    label="Drag & drop files here, or click to browse",
+    "Upload files",
     accept_multiple_files=True,
-    help="Supports PDF, DOCX, PPTX, XLSX, TXT, HTML, CSV, JSON, XML, images, EPUB, and more.",
-    label_visibility="visible",
+    label_visibility="collapsed",
 )
 
-col_convert, col_clear = st.columns([2, 1])
+col_btn, col_clr, _ = st.columns([1.2, 1, 5])
+with col_btn:
+    convert_btn = st.button("▶  Convert All", type="primary", use_container_width=True)
+with col_clr:
+    if st.button("✕  Clear", use_container_width=True):
+        st.session_state.results = []
+        st.rerun()
 
-with col_convert:
-    convert_btn = st.button(
-        "🚀 Convert to Markdown",
-        type="primary",
-        use_container_width=True,
-        disabled=not uploaded_files,
-    )
+# ---------------------------------------------------------------------------
+# Chunk size resolver
+# ---------------------------------------------------------------------------
 
-with col_clear:
-    clear_btn = st.button(
-        "🗑️ Clear All",
-        use_container_width=True,
-        disabled=not st.session_state.results,
-    )
+def _resolve_chunk_size() -> int | None:
+    if chunk_option == "None":
+        return None
+    if chunk_option == "Custom":
+        return custom_chunk_size
+    return CHUNK_PRESETS.get(chunk_option)
 
-if clear_btn:
-    _clear_all()
-    st.rerun()
-
-# ── Conversion ──────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Conversion (OCR + Optimization always-on)
+# ---------------------------------------------------------------------------
 
 if convert_btn and uploaded_files:
-    st.session_state.results = []
-    st.session_state.preview_index = None
-
-    progress_bar = st.progress(0, text="Preparing…")
-    status_area  = st.empty()
-    total        = len(uploaded_files)
-
-    new_results: list[ConversionResult] = []
+    results = []
+    progress = st.progress(0, text="Starting…")
+    total = len(uploaded_files)
 
     for idx, uf in enumerate(uploaded_files):
-        status_area.info(f"Converting **{uf.name}** ({idx + 1}/{total})…")
-        progress_bar.progress((idx) / total, text=f"{idx}/{total} files processed")
+        progress.progress(idx / total, text=f"Converting {uf.name}…")
 
-        # Validate extension
         if not converter.is_supported(uf.name):
-            result = ConversionResult(
-                source_path=UPLOAD_DIR / uf.name,
-                success=False,
-                error=f"Extension '{Path(uf.name).suffix}' is not in the supported list.",
-                file_size_bytes=len(uf.getvalue()),
-            )
-            new_results.append(result)
-            _append_history(result)
+            st.warning(f"Unsupported file type: **{uf.name}** — skipped.")
             continue
 
-        # Save to disk then convert
-        try:
-            saved_path = converter.save_upload(uf.name, uf.getvalue())
-            result = converter.convert(saved_path)
-        except Exception as exc:  # noqa: BLE001
-            result = ConversionResult(
-                source_path=UPLOAD_DIR / uf.name,
-                success=False,
-                error=str(exc),
-                file_size_bytes=len(uf.getvalue()),
+        uuid_path, original_name = converter.save_upload(uf.name, uf.getvalue())
+        result = converter.convert(uuid_path, original_name=original_name)
+
+        # Always-on OCR fallback
+        if result.success and needs_ocr_fallback(result.markdown, uuid_path):
+            ocr_text, ocr_warning = run_ocr(uuid_path)
+            if ocr_text:
+                result.markdown = ocr_text
+                result.ocr_used = True
+                result._compute_stats()
+            if ocr_warning:
+                result.ocr_warning = ocr_warning
+
+        # Always-on optimization
+        if result.success and result.markdown:
+            opt_md = optimize_markdown(result.markdown)
+            opt_stats = OptimizationStats(
+                original_text=result.markdown,
+                optimized_text=opt_md,
             )
+            st.session_state[f"opt_result_{original_name}"] = (opt_md, opt_stats)
 
-        new_results.append(result)
-        _append_history(result)
+        results.append(result)
+        st.session_state.history.append(
+            {"name": original_name, "success": result.success}
+        )
+        progress.progress((idx + 1) / total, text=f"Done {idx + 1}/{total}")
 
-    progress_bar.progress(1.0, text="Done!")
-    status_area.empty()
+    progress.empty()
+    st.session_state.results = results
 
-    st.session_state.results = new_results
+# ---------------------------------------------------------------------------
+# Results
+# ---------------------------------------------------------------------------
 
-    ok_count   = sum(1 for r in new_results if r.success)
-    fail_count = total - ok_count
-    if ok_count:
-        st.success(f"✅ Converted {ok_count}/{total} file(s) successfully.")
-    if fail_count:
-        st.error(f"❌ {fail_count} file(s) failed — see details below.")
-
-# ── Results ─────────────────────────────────────────────────────────────────
-
-results: list[ConversionResult] = st.session_state.results
+results: list = st.session_state.results
 
 if results:
-    st.divider()
-    st.markdown('<div class="section-title">📄 Conversion results</div>', unsafe_allow_html=True)
+    st.markdown("<div style='height:0.2rem'></div>", unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown('<span class="sec-label">Results</span>', unsafe_allow_html=True)
 
-    # ── Bulk download (all as ZIP) ──────────────────────────────────────
-    successful = [r for r in results if r.success]
+    successful = [r for r in results if r.success and r.output_path]
     if len(successful) > 1:
-        zip_items = [(r.source_path.stem + ".md", r.markdown) for r in successful]
-        zip_bytes = build_zip_from_strings(zip_items)
+        zip_bytes = build_zip([r.output_path for r in successful])
         st.download_button(
-            label=f"📦 Download all {len(successful)} files as ZIP",
+            "⬇  Download All as ZIP",
             data=zip_bytes,
             file_name="converted_markdown.zip",
             mime="application/zip",
-            use_container_width=True,
         )
-        st.markdown("")
+        st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
 
-    # ── Per-file cards ─────────────────────────────────────────────────
-    for i, result in enumerate(results):
-        card_class = "success" if result.success else "error"
-        status_badge = (
-            '<span class="badge badge-success">✅ Converted</span>'
-            if result.success
-            else '<span class="badge badge-error">❌ Failed</span>'
-        )
-        size_badge = f'<span class="badge badge-info">{_human_size(result.file_size_bytes)}</span>'
-        duration_badge = f'<span class="badge badge-info">{result.duration_s:.2f}s</span>'
+    for result in results:
+        card_cls = "r-card r-card-ok" if result.success else "r-card r-card-err"
+        st.markdown(f'<div class="{card_cls}">', unsafe_allow_html=True)
 
+        col_name, col_meta = st.columns([3, 2])
+        with col_name:
+            st.markdown(
+                f'<div class="r-filename">📄 {result.source_name}</div>',
+                unsafe_allow_html=True,
+            )
+        with col_meta:
+            ocr_badge = (
+                '<span class="ocr-yes">⚡ OCR Applied</span>'
+                if result.ocr_used
+                else '<span class="ocr-no">No OCR needed</span>'
+            )
+            size_kb = result.file_size_bytes / 1024
+            st.markdown(
+                f'<span class="stat-chip">{size_kb:.1f} KB</span>'
+                f'<span class="stat-chip">{result.duration_s:.2f}s</span>'
+                f' {ocr_badge}',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if not result.success:
+            st.error(f"Conversion failed: {result.error}")
+            continue
+
+        # Stats row
         st.markdown(
-            f"""
-            <div class="file-card {card_class}">
-                <div class="file-name">📄 {result.source_name}</div>
-                <div style="margin-top:0.4rem;">
-                    {status_badge}&nbsp;{size_badge}&nbsp;{duration_badge}
-                </div>
-            </div>
-            """,
+            f'<span class="stat-chip">~{format_stat(result.token_estimate)} tokens</span>'
+            f'<span class="stat-chip">{format_stat(result.word_count)} words</span>'
+            f'<span class="stat-chip">{format_stat(result.char_count)} chars</span>',
             unsafe_allow_html=True,
         )
 
-        if result.success:
-            _render_stat_cards(result)
-            st.markdown("")
+        if result.ocr_warning:
+            st.caption(f"⚠️ {result.ocr_warning}")
 
-            col_prev, col_dl = st.columns([3, 1])
+        tabs = st.tabs(["📝 Preview", "✨ Optimized", "🔀 Chunks", "⬛ Raw"])
 
-            with col_prev:
-                if st.button(
-                    f"👁️ Preview Markdown",
-                    key=f"preview_{i}",
-                    use_container_width=True,
-                ):
-                    st.session_state.preview_index = (
-                        None if st.session_state.preview_index == i else i
-                    )
+        # ── Preview ──
+        with tabs[0]:
+            preview_text = result.markdown[:3000]
+            if len(result.markdown) > 3000:
+                preview_text += "\n\n… *(truncated — see Raw tab for full content)*"
+            st.code(preview_text, language="markdown")
 
+            col_dl, col_cp = st.columns(2)
             with col_dl:
                 st.download_button(
-                    label="⬇️ Download .md",
+                    "⬇  Download Markdown",
                     data=result.markdown.encode("utf-8"),
-                    file_name=result.source_path.stem + ".md",
+                    file_name=Path(result.source_name).stem + ".md",
                     mime="text/markdown",
-                    key=f"dl_{i}",
+                    key=f"dl_{result.source_name}",
                     use_container_width=True,
                 )
+            with col_cp:
+                st.text_area(
+                    "copy",
+                    value=result.markdown,
+                    height=68,
+                    key=f"cp_{result.source_name}",
+                    label_visibility="collapsed",
+                    help="Select all and copy",
+                )
 
-            # Inline markdown preview (toggled)
-            if st.session_state.preview_index == i:
-                st.markdown("")
-                tab_rendered, tab_raw = st.tabs(["🖥️ Rendered", "📝 Raw Markdown"])
+        # ── Optimized ──
+        with tabs[1]:
+            opt_data = st.session_state.get(f"opt_result_{result.source_name}")
 
-                with tab_rendered:
-                    st.markdown(result.markdown, unsafe_allow_html=False)
-
-                with tab_raw:
-                    st.markdown(
-                        f'<div class="preview-box"><pre style="white-space:pre-wrap;word-break:break-word;">{result.markdown[:8000]}'
-                        + ("…\n*(truncated to 8 000 chars for display)*" if len(result.markdown) > 8000 else "")
-                        + "</pre></div>",
-                        unsafe_allow_html=True,
+            if not opt_data:
+                if st.button("✨ Run Optimization", key=f"opt_now_{result.source_name}"):
+                    opt_md = optimize_markdown(result.markdown)
+                    opt_stats = OptimizationStats(
+                        original_text=result.markdown,
+                        optimized_text=opt_md,
                     )
+                    opt_data = (opt_md, opt_stats)
+                    st.session_state[f"opt_result_{result.source_name}"] = opt_data
+                    st.rerun()
 
-        else:
-            # Show error details in an expander
-            with st.expander("⚠️ Error details"):
-                st.error(result.error)
+            if opt_data:
+                opt_md, opt_stats = opt_data
+                st.markdown(
+                    f"""
+                    <div class="opt-row">
+                      <div class="opt-cell">
+                        <div class="lbl">Original</div>
+                        <div class="val">{opt_stats.fmt_original()}</div>
+                      </div>
+                      <div class="opt-cell">
+                        <div class="lbl">Optimized</div>
+                        <div class="val">{opt_stats.fmt_optimized()}</div>
+                      </div>
+                      <div class="opt-cell green">
+                        <div class="lbl">Saved</div>
+                        <div class="val">{opt_stats.fmt_saved()}</div>
+                      </div>
+                      <div class="opt-cell green">
+                        <div class="lbl">% Saved</div>
+                        <div class="val">{opt_stats.fmt_percent()}</div>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.code(opt_md[:3000], language="markdown")
+                col_odl, col_ocp = st.columns(2)
+                with col_odl:
+                    st.download_button(
+                        "⬇  Download Optimized",
+                        data=opt_md.encode("utf-8"),
+                        file_name=Path(result.source_name).stem + "_optimized.md",
+                        mime="text/markdown",
+                        key=f"odl_{result.source_name}",
+                        use_container_width=True,
+                    )
+                with col_ocp:
+                    st.text_area(
+                        "copy opt",
+                        value=opt_md,
+                        height=68,
+                        key=f"ocp_{result.source_name}",
+                        label_visibility="collapsed",
+                        help="Select all and copy",
+                    )
+            else:
+                st.info("Optimization will appear here automatically after conversion.")
 
-        st.markdown("---")
+        # ── Chunks ──
+        with tabs[2]:
+            chunk_size = _resolve_chunk_size()
+            if chunk_size is None:
+                st.info("Select a chunk size in the sidebar to split this document.")
+            else:
+                if st.button("🔀 Generate Chunks", key=f"chunk_{result.source_name}"):
+                    source_text = result.markdown
+                    opt_local = st.session_state.get(f"opt_result_{result.source_name}")
+                    if opt_local:
+                        source_text = opt_local[0]
+                    chunks = chunk_markdown(source_text, chunk_size)
+                    st.session_state[f"chunks_{result.source_name}"] = chunks
 
-# ── Empty state ──────────────────────────────────────────────────────────────
+                chunks = st.session_state.get(f"chunks_{result.source_name}")
+                if chunks:
+                    st.caption(
+                        f"Generated **{len(chunks)}** chunks "
+                        f"(≤ {format_stat(chunk_size)} tokens each)"
+                    )
+                    stem = Path(result.source_name).stem
+                    chunk_items = [
+                        (f"{stem}_chunk_{i+1:03d}.md", ch)
+                        for i, ch in enumerate(chunks)
+                    ]
+                    zip_chunks = build_zip_from_strings(chunk_items)
+                    st.download_button(
+                        "⬇  Download All Chunks as ZIP",
+                        data=zip_chunks,
+                        file_name=f"{stem}_chunks.zip",
+                        mime="application/zip",
+                        key=f"chunkdl_{result.source_name}",
+                    )
+                    st.markdown("<div style='height:0.2rem'></div>", unsafe_allow_html=True)
+                    for i, chunk in enumerate(chunks):
+                        with st.expander(
+                            f"Chunk {i+1}  —  ~{format_stat(estimate_tokens(chunk))} tokens"
+                        ):
+                            st.code(chunk, language="markdown")
 
-if not results and not uploaded_files:
-    st.markdown(
-        """
-        <div style="text-align:center;padding:3rem 1rem;color:#4b5563;">
-            <div style="font-size:3.5rem;margin-bottom:0.8rem;">📂</div>
-            <div style="font-size:1.1rem;font-weight:600;color:#6b7280;">No files uploaded yet</div>
-            <div style="font-size:0.85rem;margin-top:0.4rem;">
-                Drag &amp; drop files above, or click to browse your computer.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        # ── Raw ──
+        with tabs[3]:
+            st.text_area(
+                "full raw",
+                value=result.markdown,
+                height=420,
+                key=f"raw_{result.source_name}",
+                label_visibility="collapsed",
+            )
+
+elif not uploaded_files:
+    st.markdown("""
+    <div class="empty-state">
+      <div class="empty-icon">📂</div>
+      <div class="empty-title">No files uploaded yet</div>
+      <div class="empty-sub">
+        Drop files into the upload area above, then click
+        <strong>Convert All</strong> to get started.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# Footer
+# ---------------------------------------------------------------------------
+
+st.markdown("""
+<div class="footer">
+  <div class="footer-main">
+    Made by <strong>Jaidev-cr7</strong> with ❤️
+  </div>
+  <div class="footer-sub">Powered by Microsoft MarkItDown</div>
+</div>
+""", unsafe_allow_html=True)
