@@ -11,7 +11,7 @@ from pathlib import Path
 import streamlit as st
 
 from utils.converter import FileConverter
-from utils.ocr_handler import ocr_available, needs_ocr_fallback, run_ocr
+from utils.ocr_handler import ocr_available, needs_ocr_fallback, run_ocr, warm_up_reader
 from utils.optimizer import optimize_markdown, OptimizationStats, chunk_markdown, CHUNK_PRESETS
 from utils.token_counter import estimate_tokens, format_stat, TOKEN_BACKEND
 from utils.zip_handler import build_zip, build_zip_from_strings
@@ -59,7 +59,19 @@ _init_state()
 def get_converter() -> FileConverter:
     return FileConverter(UPLOAD_DIR, CONVERTED_DIR)
 
+
+@st.cache_resource(show_spinner="Loading OCR model… (first run only)")
+def get_ocr_reader() -> None:
+    """Pre-load EasyOCR model weights once at startup.
+
+    Wrapping in @st.cache_resource means Streamlit shows a spinner while
+    the 100 MB weights download/load, and never blocks the hot path again.
+    """
+    warm_up_reader()
+
+
 converter = get_converter()
+get_ocr_reader()  # Warm EasyOCR up front — shows a spinner on first run
 
 # ---------------------------------------------------------------------------
 # Custom CSS
@@ -453,7 +465,7 @@ with st.sidebar:
     # Show which token backend is active
     backend_label = "tiktoken (exact)" if TOKEN_BACKEND == "tiktoken" else "heuristic (chars/4)"
     st.markdown(
-        f'<div class="sb-status">✓ OCR Ready</div>'
+        f'<div class="sb-status">✓ OCR Ready (fallback + embedded)</div>'
         f'<div class="sb-status">✓ Optimization Ready</div>'
         f'<div class="sb-status">✓ Tokens: {backend_label}</div>',
         unsafe_allow_html=True,
@@ -461,13 +473,30 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # ── Embedded Image OCR ──
+    embedded_ocr_mode = st.selectbox(
+        "Embedded Image OCR",
+        options=["Disabled", "Smart (Recommended)", "Aggressive"],
+        index=1,
+        help=(
+            "Disabled: Skip OCR on all embedded images — fastest.\n"
+            "Smart(Recommended): Only OCR images likely to contain useful text. Filters logos, maps, icons automatically.\n"
+            "Aggressive: OCR every embedded image without any filtering."
+        ),
+    )
+
     # ── Smart Chunking ──
-    st.markdown('<span class="sec-label">Smart Chunking</span>', unsafe_allow_html=True)
     chunk_option = st.selectbox(
-        "Chunk Size",
+        "Smart Chunking",
         options=["None", "4K tokens", "8K tokens", "16K tokens", "Custom"],
         index=0,
-        label_visibility="collapsed",
+        help=(
+            "None: No splitting — single Markdown output. Best for large-context LLMs like Claude or GPT-4.\n"
+            "4K: For GPT-3.5 and small-context models.\n"
+            "8K: For GPT-4 8K and older Claude models.\n"
+            "16K: For most modern models.\n"
+            "Custom: Set your own token limit."
+        ),
     )
     custom_chunk_size = None
     if chunk_option == "Custom":
@@ -627,45 +656,100 @@ def _resolve_overlap(chunk_size: int) -> int:
 
 if convert_btn and uploaded_files:
     results = []
-    progress = st.progress(0, text="Starting…")
     total = len(uploaded_files)
+    outer_progress = st.progress(0, text="Starting conversion…")
 
     for idx, uf in enumerate(uploaded_files):
-        progress.progress(idx / total, text=f"Converting {uf.name}…")
+        outer_progress.progress(idx / total, text=f"[{idx + 1}/{total}] {uf.name}")
 
         if not converter.is_supported(uf.name):
             st.warning(f"Unsupported file type: **{uf.name}** — skipped.")
             continue
 
-        uuid_path, original_name = converter.save_upload(uf.name, uf.getvalue())
-        result = converter.convert(uuid_path, original_name=original_name)
+        # Use st.status so each file gets an expandable step-by-step log
+        with st.status(f"Converting **{uf.name}**…", expanded=True) as file_status:
+            try:
+                # ── Save upload ──────────────────────────────────────────
+                file_status.write("💾 Saving upload…")
+                uuid_path, original_name = converter.save_upload(uf.name, uf.getvalue())
 
-        # Always-on OCR fallback
-        if result.success and needs_ocr_fallback(result.markdown, uuid_path):
-            ocr_text, ocr_warning = run_ocr(uuid_path)
-            if ocr_text:
-                result.markdown = ocr_text
-                result.ocr_used = True
-                result._compute_stats()
-            if ocr_warning:
-                result.ocr_warning = ocr_warning
+                # ── MarkItDown + embedded OCR ────────────────────────────
+                file_status.write("⚙️ Converting document (MarkItDown)…")
+                if embedded_ocr_mode != "Disabled":
+                    file_status.write(
+                        f"🔍 Embedded image OCR mode: **{embedded_ocr_mode}** "
+                        "(this may take a while on CPU)…"
+                    )
+                result = converter.convert(
+                    uuid_path,
+                    original_name=original_name,
+                    embedded_ocr_mode=embedded_ocr_mode,
+                )
 
-        # Always-on optimization
-        if result.success and result.markdown:
-            opt_md = optimize_markdown(result.markdown)
-            opt_stats = OptimizationStats(
-                original_text=result.markdown,
-                optimized_text=opt_md,
+                if not result.success:
+                    file_status.write(f"❌ Conversion failed: {result.error}")
+                    file_status.update(label=f"❌ {uf.name} — failed", state="error", expanded=True)
+                    results.append(result)
+                    st.session_state.history.append({"name": original_name, "success": False})
+                    continue
+
+                # ── OCR fallback for scanned docs / images ───────────────
+                if needs_ocr_fallback(result.markdown, uuid_path):
+                    file_status.write("📷 Running whole-document OCR fallback…")
+                    ocr_text, ocr_warning = run_ocr(uuid_path)
+                    if ocr_text:
+                        result.markdown = ocr_text
+                        result.ocr_used = True
+                        result._compute_stats()
+                    if ocr_warning:
+                        result.ocr_warning = ocr_warning
+
+                # ── Markdown optimization ────────────────────────────────
+                file_status.write("✨ Optimizing Markdown…")
+                opt_md = optimize_markdown(result.markdown)
+                opt_stats = OptimizationStats(
+                    original_text=result.markdown,
+                    optimized_text=opt_md,
+                )
+                st.session_state[f"opt_result_{original_name}"] = (opt_md, opt_stats)
+
+                # ── Done ─────────────────────────────────────────────────
+                img_note = (
+                    f", 🖼 {result.embedded_images_ocr_count} image(s) OCR'd"
+                    if result.embedded_images_ocr_count > 0
+                    else ""
+                )
+                file_status.write(
+                    f"✅ Done in {result.duration_s:.1f}s{img_note}"
+                )
+                file_status.update(
+                    label=f"✅ {uf.name} — converted in {result.duration_s:.1f}s",
+                    state="complete",
+                    expanded=False,
+                )
+
+            except Exception as exc:  # noqa: BLE001
+                import traceback
+                err_detail = traceback.format_exc()
+                st.error(f"Unexpected error processing **{uf.name}**: {exc}")
+                file_status.update(label=f"❌ {uf.name} — unexpected error", state="error")
+                # Create a failed result so session history is consistent
+                from utils.converter import ConversionResult
+                result = ConversionResult(
+                    source_path=uuid_path if 'uuid_path' in dir() else Path(uf.name),
+                    source_name=uf.name,
+                    success=False,
+                    error=str(exc),
+                )
+
+            results.append(result)
+            st.session_state.history.append(
+                {"name": uf.name, "success": result.success}
             )
-            st.session_state[f"opt_result_{original_name}"] = (opt_md, opt_stats)
 
-        results.append(result)
-        st.session_state.history.append(
-            {"name": original_name, "success": result.success}
-        )
-        progress.progress((idx + 1) / total, text=f"Done {idx + 1}/{total}")
+        outer_progress.progress((idx + 1) / total, text=f"[{idx + 1}/{total}] done")
 
-    progress.empty()
+    outer_progress.empty()
     st.session_state.results = results
 
 # ---------------------------------------------------------------------------
@@ -703,11 +787,12 @@ if results:
                 unsafe_allow_html=True,
             )
         with col_meta:
-            ocr_badge = (
-                '<span class="ocr-yes">⚡ OCR Applied</span>'
-                if result.ocr_used
-                else '<span class="ocr-no">No OCR needed</span>'
-            )
+            if result.ocr_used:
+                ocr_badge = '<span class="ocr-yes">⚡ OCR Fallback</span>'
+            elif getattr(result, 'embedded_images_ocr_count', 0) > 0:
+                ocr_badge = f'<span class="ocr-yes">🖼 {result.embedded_images_ocr_count} Image(s) OCR\'d</span>'
+            else:
+                ocr_badge = '<span class="ocr-no">No OCR needed</span>'
             size_kb = result.file_size_bytes / 1024
             st.markdown(
                 f'<span class="stat-chip">{size_kb:.1f} KB</span>'
@@ -723,10 +808,16 @@ if results:
             continue
 
         # Stats row — token count now comes from the consistent token_counter backend
+        img_ocr_chip = (
+            f'<span class="stat-chip">🖼 {result.embedded_images_ocr_count} img OCR</span>'
+            if getattr(result, 'embedded_images_ocr_count', 0) > 0
+            else ''
+        )
         st.markdown(
             f'<span class="stat-chip">~{format_stat(result.token_estimate)} tokens</span>'
             f'<span class="stat-chip">{format_stat(result.word_count)} words</span>'
-            f'<span class="stat-chip">{format_stat(result.char_count)} chars</span>',
+            f'<span class="stat-chip">{format_stat(result.char_count)} chars</span>'
+            f'{img_ocr_chip}',
             unsafe_allow_html=True,
         )
 
