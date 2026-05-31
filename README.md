@@ -90,9 +90,9 @@ All settings are available in the sidebar at runtime — no config files needed:
 
 | Setting | Description |
 |---|---|
-| **Enable OCR Fallback** | Run EasyOCR on images or scanned PDFs with little/no extracted text |
-| **Auto-Optimize Markdown** | Automatically clean and deduplicate Markdown after conversion |
 | **Chunk Size** | Split output into 4K / 8K / 16K / Custom token chunks for LLM context windows |
+
+> **Note:** OCR fallback and Markdown optimization are currently **always-on automatic** to provide the best possible AI-ready output out of the box.
 
 ## 🛠️ Built With
 
